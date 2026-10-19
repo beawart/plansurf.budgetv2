@@ -1,31 +1,25 @@
 # PlanSurf Budget V2
 
-An isolated starter for rebuilding PlanSurf Budget around user-owned OneDrive storage and client-side encryption. The current static site includes the budget UI and legacy password-based sync to `plansurf-service`; it does not implement Microsoft sign-in, client-side encryption, or OneDrive sync, and is not ready for real user data.
+PlanSurf Budget stores its synced budget in the signed-in user's OneDrive app folder. Microsoft sign-in and Microsoft Graph requests run directly in the browser; the budget file is encrypted locally before upload. No budget backend is required.
 
 ## Architecture target
 
 ```text
 Browser app
-  - authenticates the user with Microsoft
-  - encrypts/decrypts budget data locally
-  - sends only ciphertext to the sync API
-
-Render API
-  - validates the user's session
-  - keeps Microsoft refresh/access tokens encrypted at rest
-  - reads/writes the user's app-specific OneDrive folder
-  - never receives the budget key or plaintext budget data
+  - signs in to the user's personal Microsoft account
+  - encrypts/decrypts the budget with a user-held passphrase
+  - reads/writes ciphertext directly to Microsoft Graph
 
 User's OneDrive
-  - owns the encrypted budget file
-  - remains available to the user after app access is revoked
+  - owns the encrypted file in the PlanSurf app folder
+  - remains under the user's Microsoft account and can be deleted there
 ```
 
-The existing `plansurf.service` is not a compatible sync backend for this design: its current budget route accepts and stores plaintext JSON in a shared GitHub repository. V2 needs a separate API contract and an explicit migration before it can claim server-blind storage.
+The optional migration action reads the existing plaintext budget from `plansurf-service`, encrypts it in the browser, and saves it to OneDrive. It does not delete the old copy in the private GitHub repository; retention and deletion there must be handled separately.
 
 ## Run the static container
 
-Requires Docker:
+Requires Docker. Before building, set the public Microsoft Entra application client ID in `site/config.js`.
 
 ```powershell
 docker build -t plansurf-budgetv2:local .
@@ -34,15 +28,23 @@ docker run --rm -p 8080:8080 plansurf-budgetv2:local
 
 Open `http://localhost:8080`; `http://localhost:8080/health` is the container health endpoint. The image serves static files as an unprivileged Nginx process. The same image can later run under Kubernetes behind a `Deployment`, `Service`, and HTTPS `Ingress`.
 
-The current page loads React, ReactDOM, PapaParse, and Babel from `unpkg.com`. Nginx applies a per-response nonce to Babel's transformed JSX and allows requests to the legacy sync API. These are prototype accommodations, not a production-ready dependency or privacy boundary; replace the external scripts with pinned, locally bundled assets and a build-time JSX transform before handling real financial data.
+### Microsoft Entra setup
 
-## Before connecting OneDrive
+1. Register a **single-page application** supporting personal Microsoft accounts.
+2. Add the exact app origin as a SPA redirect URI (for local Docker: `http://localhost:8080/`; use the deployed HTTPS origin in production).
+3. Add the delegated Microsoft Graph permission `Files.ReadWrite.AppFolder` and grant user consent as required. Do not create a client secret; the client ID is public.
+4. Copy the Application (client) ID into `site/config.js`, then rebuild/redeploy the static image.
 
-1. Register a Microsoft Entra application and choose supported account types, redirect URI, and the narrowest delegated OneDrive permission compatible with the desired app-folder behavior. Verify current Microsoft permissions and consent requirements before release.
-2. Define the OAuth flow and token lifecycle. If the API stores refresh tokens, encrypt them at rest, scope them to the user, support disconnect/revocation, and never put them in the frontend bundle.
-3. Define a versioned encrypted-file format using reviewed cryptographic libraries and authenticated encryption. Derive/protect keys on the client; never send passphrases, keys, or plaintext to the API. Document recovery and lost-passphrase behavior.
-4. Implement conflict handling, backup/version history, export, delete, and disconnect behavior. Test multi-device sync and revocation before onboarding users.
-5. Bundle and pin all client dependencies, remove third-party scripts from the sensitive app, review the CSP, and protect the release pipeline. A hosted client can technically be changed to capture data before encryption, so do not promise protection from a malicious client release.
-6. Migrate existing data deliberately. The current service stores plaintext budget JSON; previously stored copies/backups need an explicit retention and deletion plan.
+The app uses the `consumers` authority and saves `PlanSurfBudget.enc.json` under the app's OneDrive `Apps` folder. It does not request access to the rest of the user's drive. Microsoft sign-in, Graph file access, and the legacy migration require network connectivity.
 
-The hosted-client caveat is a trust-boundary issue to plan for now. You can defer stronger mitigations while building a prototype with test data, but address the release pipeline, dependency policy, and accurate privacy claims before collecting real users' financial data.
+### Encryption and migration
+
+The file uses AES-256-GCM with a key derived in the browser from the user's passphrase using PBKDF2-SHA-256. The passphrase is not stored or sent to Microsoft; the same passphrase is needed on every device. There is no passphrase recovery. Losing it makes the encrypted OneDrive file unreadable. The app currently also keeps a plaintext working copy in that browser's local storage.
+
+To move the existing budget, open Budget Sync, sign in to Microsoft, enter a new encryption passphrase and the current `plansurf-service` password, then choose **Import and encrypt existing budget**. Verify the OneDrive copy before separately arranging deletion/retention of the old GitHub-backed copy. Normal Load/Save actions only read/write the OneDrive file.
+
+The page still uses browser-loaded React/Babel/PapaParse and MSAL assets. The per-response CSP nonce permits Babel's transformed app code without enabling inline scripts or `unsafe-eval`; `unsafe-inline` is allowed for styles because the existing React UI uses dynamic style attributes. A hosted client can be changed to capture data before encryption; bundle and pin dependencies, move JSX transformation to build time, review the release pipeline, and address local-storage protection before treating this as production-ready for financial data.
+
+## Before production release
+
+Before onboarding users, add a recovery/export plan, test multi-device sync and revocation, protect the release pipeline, and decide how to protect plaintext local browser storage and remove third-party runtime dependencies. Previously stored copies in GitHub and its backups need an explicit retention and deletion plan.

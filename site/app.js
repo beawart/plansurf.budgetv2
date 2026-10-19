@@ -11,10 +11,110 @@ const load = (key, fallback) => {
 
 const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
 const uid = () => Math.random().toString(36).slice(2, 11) + Date.now().toString(36);
-const API_BASE_URL = 'https://plansurf-service.onrender.com';
+const GRAPH_FILE_PATH = '/me/drive/special/approot:/PlanSurfBudget.enc.json:/content';
+const LEGACY_API_BASE_URL = 'https://plansurf-service.onrender.com';
+const MICROSOFT_CLIENT_ID = window.PLAN_SURF_CONFIG?.microsoftClientId?.trim() || '';
+const MSAL_SCOPES = ['Files.ReadWrite.AppFolder'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const mk = (year, month) => `${year}-${String(month + 1).padStart(2, '0')}`;
 const fmt = (n) => Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const bytesToBase64 = (bytes) => {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+};
+
+const base64ToBytes = (value) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+
+const deriveBudgetKey = async (passphrase, salt, iterations) => {
+  const material = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(passphrase),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+};
+
+const encryptBudget = async (data, passphrase) => {
+  if (!passphrase) throw new Error('Enter your OneDrive encryption passphrase.');
+
+  const iterations = 310000;
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveBudgetKey(passphrase, salt, iterations);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    new TextEncoder().encode(JSON.stringify(data))
+  );
+
+  return JSON.stringify({
+    format: 'plansurf-budget-encrypted',
+    version: 1,
+    kdf: 'PBKDF2-SHA-256',
+    iterations,
+    cipher: 'AES-256-GCM',
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext))
+  });
+};
+
+const decryptBudget = async (serialized, passphrase) => {
+  if (!passphrase) throw new Error('Enter your OneDrive encryption passphrase.');
+
+  let envelope;
+  try {
+    envelope = JSON.parse(serialized);
+  } catch {
+    throw new Error('The OneDrive file is not a valid encrypted PlanSurf budget.');
+  }
+
+  if (
+    envelope?.format !== 'plansurf-budget-encrypted' ||
+    envelope.version !== 1 ||
+    envelope.kdf !== 'PBKDF2-SHA-256' ||
+    envelope.cipher !== 'AES-256-GCM' ||
+    !Number.isSafeInteger(envelope.iterations) ||
+    envelope.iterations < 100000 ||
+    envelope.iterations > 1000000 ||
+    typeof envelope.salt !== 'string' ||
+    typeof envelope.iv !== 'string' ||
+    typeof envelope.ciphertext !== 'string'
+  ) {
+    throw new Error('The OneDrive file uses an unsupported or invalid encryption format.');
+  }
+
+  try {
+    const key = await deriveBudgetKey(passphrase, base64ToBytes(envelope.salt), envelope.iterations);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: base64ToBytes(envelope.iv) },
+      key,
+      base64ToBytes(envelope.ciphertext)
+    );
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    throw new Error('Could not decrypt the OneDrive budget. Check the passphrase and file integrity.');
+  }
+};
+
+const validateSyncData = (data) => {
+  if (!data || (data.app !== undefined && data.app !== 'plansurf-budget') || !data.transactions || typeof data.transactions !== 'object' || Array.isArray(data.transactions) || !Array.isArray(data.goals)) {
+    throw new Error('The budget file is not a valid PlanSurf budget backup.');
+  }
+  return data;
+};
 
 const CATEGORIES = [
   { id: 'salary', label: 'Salary', icon: '💵', color: '#16a34a', type: 'income' },
@@ -108,7 +208,20 @@ function App() {
   const [curYear, setCurYear] = useState(now.getFullYear());
   const [dark, setDark] = useState(() => localStorage.getItem('bp-dark') === '1');
   const [syncModal, setSyncModal] = useState(false);
-  const [sessionToken, setSessionToken] = useState('');
+  const [account, setAccount] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [msalClient] = useState(() => (
+    MICROSOFT_CLIENT_ID && window.msal?.PublicClientApplication
+      ? new window.msal.PublicClientApplication({
+        auth: {
+          clientId: MICROSOFT_CLIENT_ID,
+          authority: 'https://login.microsoftonline.com/consumers',
+          redirectUri: `${window.location.origin}/`
+        },
+        cache: { cacheLocation: 'sessionStorage' }
+      })
+      : null
+  ));
   const [syncStatus, setSyncStatus] = useState('Ready');
   const [dirty, setDirty] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -124,6 +237,37 @@ function App() {
 
   useEffect(() => { save(S + '-tx', transactions); }, [transactions]);
   useEffect(() => { save(S + '-goals', goals); }, [goals]);
+  useEffect(() => {
+    let active = true;
+    const initializeMicrosoftAuth = async () => {
+      if (!msalClient) {
+        setSyncStatus(MICROSOFT_CLIENT_ID
+          ? 'Microsoft sign-in library did not load'
+          : 'Configure a Microsoft Entra client ID to connect OneDrive');
+        setAuthLoading(false);
+        return;
+      }
+
+      await msalClient.initialize();
+      const redirectResult = await msalClient.handleRedirectPromise();
+      const cachedAccounts = msalClient.getAllAccounts();
+      const signedInAccount = redirectResult?.account || msalClient.getActiveAccount() || (cachedAccounts.length === 1 ? cachedAccounts[0] : null);
+      if (active && signedInAccount) {
+        msalClient.setActiveAccount(signedInAccount);
+        setAccount(signedInAccount);
+        setSyncStatus(`Connected as ${signedInAccount.username}`);
+      }
+      if (active) setAuthLoading(false);
+    };
+
+    initializeMicrosoftAuth().catch((error) => {
+      if (active) {
+        setSyncStatus(`Microsoft sign-in initialization failed: ${error.message}`);
+        setAuthLoading(false);
+      }
+    });
+    return () => { active = false; };
+  }, [msalClient]);
   useEffect(() => {
     if (syncReady.current) {
       if (suppressDirty.current) {
@@ -142,6 +286,7 @@ function App() {
 
   const key = mk(curYear, curMonth);
   const monthTx = transactions[key] || [];
+  const hasLocalBudget = Object.values(transactions).some((items) => Array.isArray(items) && items.length > 0) || goals.length > 0;
 
   const addTx = (event) => {
     event.preventDefault();
@@ -359,108 +504,184 @@ function App() {
     }
   };
 
-  const syncData = { version: 1, app: 'plansurf-budget', transactions, goals, updatedAt: new Date().toISOString() };
-  const apiUrl = (path) => `${API_BASE_URL}${path}`;
-
-  const apiRequest = async (path, options = {}) => {
-    const response = await fetch(apiUrl(path), {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
-        ...(options.headers || {})
-      },
-      cache: 'no-store'
-    });
-
-    const payload = await response.json().catch(() => ({ error: 'The API returned an invalid response.' }));
-    if (!response.ok) throw new Error(payload.error || `API request failed (${response.status}).`);
-    return payload;
-  };
-
-  const loginApi = async (password) => {
-    setSyncing(true);
-    setSyncStatus('Signing in...');
-    try {
-      const payload = await apiRequest('/api/budget/login', {
-        method: 'POST',
-        body: JSON.stringify({ password }),
-        headers: {}
-      });
-      setSessionToken(payload.token);
-      setSyncStatus('Signed in');
-      return true;
-    } catch (error) {
-      setSyncStatus('Sign in failed: ' + error.message);
-      return false;
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  const logoutApi = async () => {
-    let status = 'Signed out';
-    try {
-      if (sessionToken) await apiRequest('/api/budget/logout', { method: 'POST' });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      status = `Signed out locally; server sign-out failed: ${message}`;
-    }
-    setSessionToken('');
-    setSyncStatus(status);
-  };
-
   const applySyncData = (data) => {
-    if (!data || (data.app !== undefined && data.app !== 'plansurf-budget') || !data.transactions || typeof data.transactions !== 'object' || Array.isArray(data.transactions) || !Array.isArray(data.goals)) {
-      throw new Error('The JSON file is not a valid PlanSurf budget backup.');
-    }
-
+    validateSyncData(data);
     suppressDirty.current = true;
     setTransactions(data.transactions);
     setGoals(data.goals);
   };
 
-  const pullGitHub = async () => {
-    if (!sessionToken) {
-      setSyncStatus('Sign in before syncing budget data');
+  const signInMicrosoft = async () => {
+    if (!msalClient) {
+      setSyncStatus('Configure a Microsoft Entra client ID before signing in');
       return;
     }
-
-    if (dirty && !window.confirm('Pulling will replace unsaved local changes. Continue?')) {
-      return;
-    }
-
     setSyncing(true);
-    setSyncStatus('Loading budget...');
+    setSyncStatus('Opening Microsoft sign-in...');
     try {
-      applySyncData(await apiRequest('/api/budget/data'));
-      setDirty(false);
-      setSyncStatus('Budget synced');
+      const prompt = msalClient.getAllAccounts().length > 1 ? 'select_account' : undefined;
+      const result = await msalClient.loginPopup({ scopes: MSAL_SCOPES, prompt });
+      msalClient.setActiveAccount(result.account);
+      setAccount(result.account);
+      setSyncStatus(`Connected as ${result.account.username}`);
     } catch (error) {
-      setSyncStatus('Pull failed: ' + error.message);
+      setSyncStatus(`Microsoft sign-in failed: ${error.message}`);
     } finally {
       setSyncing(false);
     }
   };
 
-  const pushGitHub = async () => {
-    if (!sessionToken) {
-      setSyncStatus('Sign in before syncing budget data');
-      return;
+  const signOutMicrosoft = async () => {
+    if (!msalClient || !account) return;
+    setSyncing(true);
+    try {
+      await msalClient.logoutPopup({ account, mainWindowRedirectUri: `${window.location.origin}/` });
+      setAccount(null);
+      setSyncStatus('Disconnected from OneDrive');
+    } catch (error) {
+      setSyncStatus(`Microsoft sign-out failed: ${error.message}`);
+    } finally {
+      setSyncing(false);
     }
+  };
+
+  const acquireGraphToken = async () => {
+    if (!msalClient || !account) throw new Error('Sign in to Microsoft before accessing OneDrive.');
+    try {
+      const result = await msalClient.acquireTokenSilent({ scopes: MSAL_SCOPES, account });
+      return result.accessToken;
+    } catch (error) {
+      if (!(error instanceof window.msal.InteractionRequiredAuthError)) throw error;
+      const result = await msalClient.acquireTokenPopup({ scopes: MSAL_SCOPES, account });
+      return result.accessToken;
+    }
+  };
+
+  const graphFileRequest = async (method, body) => {
+    const accessToken = await acquireGraphToken();
+    const response = await fetch(`https://graph.microsoft.com/v1.0${GRAPH_FILE_PATH}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(body === undefined ? {} : { 'Content-Type': 'text/plain; charset=utf-8' })
+      },
+      ...(body === undefined ? {} : { body }),
+      cache: 'no-store'
+    });
+
+    if (response.status === 404 && method === 'GET') return null;
+    if (!response.ok) {
+      const details = await response.json().catch(() => ({}));
+      throw new Error(details.error?.message || `OneDrive request failed (${response.status}).`);
+    }
+    return method === 'GET' ? response.text() : response.json();
+  };
+
+  const pullOneDrive = async (passphrase) => {
+    if ((dirty || hasLocalBudget) && !window.confirm('Loading from OneDrive will replace the current local budget. Continue?')) return;
+    setSyncing(true);
+    setSyncStatus('Loading encrypted budget from OneDrive...');
+    try {
+      const serialized = await graphFileRequest('GET');
+      if (serialized === null) {
+        setSyncStatus('No PlanSurf budget file found in this OneDrive app folder');
+        return;
+      }
+      const data = validateSyncData(await decryptBudget(serialized, passphrase));
+      applySyncData(data);
+      setDirty(false);
+      setSyncStatus('Encrypted budget loaded from OneDrive');
+    } catch (error) {
+      setSyncStatus(`OneDrive load failed: ${error.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const pushOneDrive = async (passphrase) => {
+    setSyncing(true);
+    setSyncStatus('Encrypting and saving budget to OneDrive...');
+    try {
+      const serialized = await encryptBudget({
+        version: 1,
+        app: 'plansurf-budget',
+        transactions,
+        goals,
+        updatedAt: new Date().toISOString()
+      }, passphrase);
+      await graphFileRequest('PUT', serialized);
+      setDirty(false);
+      setSyncStatus('Encrypted budget saved to your OneDrive app folder');
+    } catch (error) {
+      setSyncStatus(`OneDrive save failed: ${error.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const legacyRequest = async (path, options = {}, token) => {
+    const response = await fetch(`${LEGACY_API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {})
+      },
+      cache: 'no-store'
+    });
+    const payload = await response.json().catch(() => ({ error: 'The legacy service returned an invalid response.' }));
+    if (!response.ok) throw new Error(payload.error || `Legacy service request failed (${response.status}).`);
+    return payload;
+  };
+
+  const migrateLegacyBudget = async (legacyPassword, passphrase) => {
+    if (!legacyPassword.trim()) {
+      setSyncStatus('Enter the current plansurf-service password to migrate your budget');
+      return false;
+    }
+    if (!passphrase) {
+      setSyncStatus('Enter a OneDrive encryption passphrase before migrating');
+      return false;
+    }
+    if ((dirty || hasLocalBudget) && !window.confirm('Migration will replace the current local budget with the legacy budget after saving it to OneDrive. Continue?')) return false;
 
     setSyncing(true);
-    setSyncStatus('Saving budget...');
+    setSyncStatus('Reading your existing budget from plansurf-service...');
+    let legacyToken = '';
+    let logoutWarning = '';
     try {
-      await apiRequest('/api/budget/data', {
-        method: 'PUT',
-        body: JSON.stringify(syncData)
+      const login = await legacyRequest('/api/budget/login', {
+        method: 'POST',
+        body: JSON.stringify({ password: legacyPassword })
       });
+      if (typeof login.token !== 'string' || !login.token) throw new Error('The legacy service did not return a valid session.');
+      legacyToken = login.token;
+      const data = validateSyncData(await legacyRequest('/api/budget/data', {}, legacyToken));
+
+      try {
+        await legacyRequest('/api/budget/logout', { method: 'POST' }, legacyToken);
+      } catch (error) {
+        logoutWarning = ` Legacy sign-out failed: ${error.message}`;
+      }
+      legacyToken = '';
+
+      const serialized = await encryptBudget(data, passphrase);
+      await graphFileRequest('PUT', serialized);
+      applySyncData(data);
       setDirty(false);
-      setSyncStatus('Budget saved');
+      setSyncStatus(`Legacy budget migrated to encrypted OneDrive storage.${logoutWarning} The old GitHub copy was not deleted.`);
+      return true;
     } catch (error) {
-      setSyncStatus('Backup failed: ' + error.message);
+      setSyncStatus(`Migration failed: ${error.message}`);
+      return false;
     } finally {
+      if (legacyToken) {
+        try {
+          await legacyRequest('/api/budget/logout', { method: 'POST' }, legacyToken);
+        } catch (error) {
+          setSyncStatus((current) => `${current} Legacy sign-out failed: ${error.message}`);
+        }
+      }
       setSyncing(false);
     }
   };
@@ -630,14 +851,17 @@ function App() {
 
       {syncModal && (
         <SyncModal
-          sessionToken={sessionToken}
+          account={account}
+          configured={Boolean(msalClient)}
+          authLoading={authLoading}
           dirty={dirty}
           syncing={syncing}
           onClose={() => setSyncModal(false)}
-          onLogin={loginApi}
-          onLogout={logoutApi}
-          onPull={pullGitHub}
-          onPush={pushGitHub}
+          onSignIn={signInMicrosoft}
+          onSignOut={signOutMicrosoft}
+          onPull={pullOneDrive}
+          onPush={pushOneDrive}
+          onMigrate={migrateLegacyBudget}
           status={syncStatus}
         />
       )}
@@ -897,56 +1121,81 @@ function TransactionEditRow({ draft, setDraft, onSave, onCancel }) {
   );
 }
 
-function SyncModal({ sessionToken, dirty, syncing, onClose, onLogin, onLogout, onPull, onPush, status }) {
-  const [password, setPassword] = useState('');
+function SyncModal({ account, configured, authLoading, dirty, syncing, onClose, onSignIn, onSignOut, onPull, onPush, onMigrate, status }) {
+  const [passphrase, setPassphrase] = useState('');
+  const [legacyPassword, setLegacyPassword] = useState('');
+
+  const migrate = async () => {
+    const migrated = await onMigrate(legacyPassword, passphrase);
+    if (migrated) {
+      setLegacyPassword('');
+      setPassphrase('');
+    }
+  };
 
   return (
     <div className="modal-ov" onClick={onClose}>
-      <div className="modal" onClick={(event) => event.stopPropagation()}>
-        <h3>Budget Sync</h3>
+      <div className="modal sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" onClick={(event) => event.stopPropagation()}>
+        <h3 id="sync-title">Your OneDrive budget</h3>
+        {!account ? (
+          <>
+            <p className="sync-description">Sign in with your personal Microsoft account. Your encrypted budget is stored in your OneDrive app folder.</p>
+            {!configured && <div className="import-error">OneDrive is not configured yet. Set the Microsoft Entra client ID in <code>site/config.js</code> and register this app's URL as a single-page application redirect URI.</div>}
+            <div className="sync-note">Status: {status}</div>
+            <div className="sync-actions">
+              <button className="btn btn-g" onClick={onClose}>Close</button>
+              <button className="btn btn-p" disabled={!configured || authLoading || syncing} onClick={onSignIn}>
+                {authLoading || syncing ? 'Connecting...' : 'Sign in with Microsoft'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="sync-description">Connected as <strong>{account.username}</strong>. The OneDrive file is encrypted before it leaves this browser.</p>
+            <div className="fg">
+              <label htmlFor="budget-passphrase">OneDrive encryption passphrase</label>
+              <input
+                id="budget-passphrase"
+                type="password"
+                value={passphrase}
+                onChange={(event) => setPassphrase(event.target.value)}
+                autoComplete="new-password"
+                placeholder="Enter your budget passphrase"
+              />
+              <div className="hint">This passphrase is never stored or sent to Microsoft. You must remember it; there is no recovery if it is lost.</div>
+            </div>
 
-        {!sessionToken && (
-          <div className="fg">
-            <label>Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
-              onKeyDown={async (event) => {
-                if (event.key === 'Enter' && !syncing && password.trim()) {
-                  const success = await onLogin(password);
-                  if (success) setPassword('');
-                }
-              }}
-            />
-            {status && <div className="hint">{status}</div>}
-          </div>
+            <div className="sync-actions sync-primary-actions">
+              <button className="btn btn-g" disabled={syncing || !passphrase} onClick={() => onPull(passphrase)}>⇣ Load from OneDrive</button>
+              <button className="btn btn-p" disabled={syncing || !passphrase} onClick={() => onPush(passphrase)}>⇡ Save to OneDrive</button>
+            </div>
+
+            <div className="migration-panel">
+              <h4>Move your existing budget</h4>
+              <p>Import the current budget from plansurf-service, encrypt it, and save it to this OneDrive. This does not delete the old GitHub copy.</p>
+              <div className="fg">
+                <label htmlFor="legacy-password">Current plansurf-service password</label>
+                <input
+                  id="legacy-password"
+                  type="password"
+                  value={legacyPassword}
+                  onChange={(event) => setLegacyPassword(event.target.value)}
+                  autoComplete="current-password"
+                  placeholder="Legacy sync password"
+                />
+              </div>
+              <button className="btn btn-g" disabled={syncing || !passphrase || !legacyPassword.trim()} onClick={migrate}>
+                {syncing ? 'Migrating...' : 'Import and encrypt existing budget'}
+              </button>
+            </div>
+
+            <div className="sync-note">Status: {status}{dirty ? ' • local changes need backup' : ''}</div>
+            <div className="sync-actions">
+              <button className="btn btn-g" onClick={onClose}>Close</button>
+              <button className="btn btn-g" disabled={syncing} onClick={onSignOut}>Sign out of Microsoft</button>
+            </div>
+          </>
         )}
-
-        <div className="sync-note">Status: {status}{dirty ? ' • local changes need backup' : ''}</div>
-
-        <div className="sync-actions">
-          <button className="btn btn-g" onClick={onClose}>Close</button>
-          {sessionToken ? (
-            <>
-              <button className="btn btn-g" disabled={syncing} onClick={onPull}>⇣ Pull latest</button>
-              <button className="btn btn-p" disabled={syncing} onClick={onPush}>⇡ Save local data</button>
-              <button className="btn btn-g" disabled={syncing} onClick={onLogout}>Sign out</button>
-            </>
-          ) : (
-            <button
-              className="btn btn-p"
-              disabled={syncing || !password.trim()}
-              onClick={async () => {
-                const success = await onLogin(password);
-                if (success) setPassword('');
-              }}
-            >
-              {syncing ? 'Signing in...' : 'Sign in'}
-            </button>
-          )}
-        </div>
       </div>
     </div>
   );
