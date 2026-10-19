@@ -1,6 +1,6 @@
 # PlanSurf Budget V2
 
-An isolated starter for rebuilding PlanSurf Budget around user-owned OneDrive storage and client-side encryption. This is currently only a static-container shell. It does not contain the existing budget UI, Microsoft sign-in, encryption, or data sync, and is not ready for real user data.
+An isolated starter for rebuilding PlanSurf Budget around user-owned OneDrive storage and client-side encryption. The current static site includes the budget UI and legacy password-based sync to `plansurf-service`; it does not implement Microsoft sign-in, client-side encryption, or OneDrive sync, and is not ready for real user data.
 
 ## Architecture target
 
@@ -33,6 +33,8 @@ docker run --rm -p 8080:8080 plansurf-budgetv2:local
 ```
 
 Open `http://localhost:8080`; `http://localhost:8080/health` is the container health endpoint. The image serves static files as an unprivileged Nginx process. The same image can later run under Kubernetes behind a `Deployment`, `Service`, and HTTPS `Ingress`.
+
+The current page loads React, ReactDOM, PapaParse, and Babel from `unpkg.com`. Nginx applies a per-response nonce to Babel's transformed JSX and allows requests to the legacy sync API. These are prototype accommodations, not a production-ready dependency or privacy boundary; replace the external scripts with pinned, locally bundled assets and a build-time JSX transform before handling real financial data.
 
 ## Before connecting OneDrive
 

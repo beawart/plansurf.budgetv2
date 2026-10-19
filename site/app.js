@@ -399,11 +399,15 @@ function App() {
   };
 
   const logoutApi = async () => {
+    let status = 'Signed out';
     try {
       if (sessionToken) await apiRequest('/api/budget/logout', { method: 'POST' });
-    } catch {}
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      status = `Signed out locally; server sign-out failed: ${message}`;
+    }
     setSessionToken('');
-    setSyncStatus('Signed out');
+    setSyncStatus(status);
   };
 
   const applySyncData = (data) => {
