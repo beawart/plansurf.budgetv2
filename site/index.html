@@ -1,23 +1,20 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f6f5f2">
-  <title>PlanSurf Budget V2</title>
-  <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js" defer></script>
-</head>
-<body>
-  <main>
-    <p class="eyebrow">PLANSURF / PRIVATE BUDGET</p>
-    <h1>Budget V2</h1>
-    <p class="lead">A private-by-design rebuild is underway.</p>
-    <section aria-labelledby="status-title">
-      <h2 id="status-title">Sync is not enabled</h2>
-      <p>This starter does not connect to OneDrive or upload budget data. The encryption and Microsoft authorization flow must be implemented and tested before using it with real financial information.</p>
-      <p id="container-status" role="status">Checking static service…</p>
-    </section>
-  </main>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f5f2" />
+    <title>PlanSurf Budget</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231d4ed8'/%3E%3Cpath d='M16 23h32v27H16z' fill='none' stroke='white' stroke-width='5'/%3E%3Cpath d='M22 23v-5h20v5M23 32h18M23 41h10' fill='none' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/papaparse@5.5.3/papaparse.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="text/babel" src="/app.js"></script>
+  </body>
 </html>
