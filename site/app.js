@@ -216,7 +216,7 @@ function App() {
         auth: {
           clientId: MICROSOFT_CLIENT_ID,
           authority: 'https://login.microsoftonline.com/consumers',
-          redirectUri: `${window.location.origin}/`
+          redirectUri: new URL('./', window.location.href).href
         },
         cache: { cacheLocation: 'sessionStorage' }
       })
@@ -535,7 +535,7 @@ function App() {
     if (!msalClient || !account) return;
     setSyncing(true);
     try {
-      await msalClient.logoutPopup({ account, mainWindowRedirectUri: `${window.location.origin}/` });
+      await msalClient.logoutPopup({ account, mainWindowRedirectUri: new URL('./', window.location.href).href });
       setAccount(null);
       setSyncStatus('Disconnected from OneDrive');
     } catch (error) {
