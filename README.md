@@ -31,7 +31,9 @@ Open `http://localhost:8080`; `http://localhost:8080/health` is the container he
 ### Microsoft Entra setup
 
 1. Register a **single-page application** supporting personal Microsoft accounts.
-2. Add the exact app URL as a SPA redirect URI: for local Docker use `http://localhost:8080/`; for this GitHub Pages project use `https://beawart.github.io/plansurf.budgetv2/`.
+2. Under **Authentication → Add a platform → Single-page application**, add the redirect URIs for each environment where you will run the app:
+   - `http://localhost:8080/` and `http://localhost:8080/auth-callback.html` for local Docker.
+   - `https://beawart.github.io/plansurf.budgetv2/` and `https://beawart.github.io/plansurf.budgetv2/auth-callback.html` for GitHub Pages.
 3. Add the delegated Microsoft Graph permission `Files.ReadWrite.AppFolder` and grant user consent as required. Do not create a client secret; the client ID is public.
 4. For Docker, copy the Application (client) ID into `site/config.js` and rebuild. For GitHub Pages, add a repository variable named `MICROSOFT_CLIENT_ID` under **Settings → Secrets and variables → Actions → Variables**; the Pages workflow writes it into the deployed config.
 
@@ -54,7 +56,7 @@ This repository keeps the app in `site/`, which is not an available folder in th
 3. Add the `MICROSOFT_CLIENT_ID` Actions repository variable as described above.
 4. Wait for the **Deploy GitHub Pages** workflow to finish. GitHub will show the site URL under **Settings → Pages** and in the workflow deployment.
 
-The project URL is `https://beawart.github.io/plansurf.budgetv2/`. Add that exact URL as the Entra SPA redirect URI before testing Microsoft sign-in. Without the client ID and redirect registration, the page can load, but OneDrive sign-in and saving are not enabled. The one-time legacy migration also depends on the existing service allowing browser requests from the Pages origin (CORS).
+The project URL is `https://beawart.github.io/plansurf.budgetv2/`. The app uses the `auth-callback.html` page to finish popup sign-in without loading the budget app inside the Microsoft authentication popup. Register both the project URL (used after sign-out) and the callback URL as Entra SPA redirect URIs. Without the client ID and redirect registration, the page can load, but OneDrive sign-in and saving are not enabled. The one-time legacy migration also depends on the existing service allowing browser requests from the Pages origin (CORS).
 
 ## Before production release
 

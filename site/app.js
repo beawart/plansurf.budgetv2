@@ -216,7 +216,7 @@ function App() {
         auth: {
           clientId: MICROSOFT_CLIENT_ID,
           authority: 'https://login.microsoftonline.com/consumers',
-          redirectUri: new URL('./', window.location.href).href
+          redirectUri: new URL('./auth-callback.html', window.location.href).href
         },
         cache: { cacheLocation: 'sessionStorage' }
       })
@@ -1140,7 +1140,7 @@ function SyncModal({ account, configured, authLoading, dirty, syncing, onClose, 
         {!account ? (
           <>
             <p className="sync-description">Sign in with your personal Microsoft account. Your encrypted budget is stored in your OneDrive app folder.</p>
-            {!configured && <div className="import-error">OneDrive is not configured yet. Set the Microsoft Entra client ID in <code>site/config.js</code> and register this app's URL as a single-page application redirect URI.</div>}
+            {!configured && <div className="import-error">OneDrive is not configured yet. Set the Microsoft Entra client ID in <code>site/config.js</code> and register this app URL and its <code>auth-callback.html</code> URL as single-page application redirect URIs.</div>}
             <div className="sync-note">Status: {status}</div>
             <div className="sync-actions">
               <button className="btn btn-g" onClick={onClose}>Close</button>
