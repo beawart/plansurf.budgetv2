@@ -1,5 +1,6 @@
 ﻿const { useState, useEffect, useMemo, useRef } = React;
 const S = 'budget-planner-v1';
+const SYNC_MODAL_REDIRECT_KEY = 'budget-planner-open-sync-after-login';
 
 const load = (key, fallback) => {
   try {
@@ -207,7 +208,7 @@ function App() {
   const [curMonth, setCurMonth] = useState(now.getMonth());
   const [curYear, setCurYear] = useState(now.getFullYear());
   const [dark, setDark] = useState(() => localStorage.getItem('bp-dark') === '1');
-  const [syncModal, setSyncModal] = useState(false);
+  const [syncModal, setSyncModal] = useState(() => sessionStorage.getItem(SYNC_MODAL_REDIRECT_KEY) === '1');
   const [account, setAccount] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [msalClient] = useState(() => (
@@ -216,7 +217,7 @@ function App() {
         auth: {
           clientId: MICROSOFT_CLIENT_ID,
           authority: 'https://login.microsoftonline.com/consumers',
-          redirectUri: new URL('./auth-callback.html', window.location.href).href
+          redirectUri: new URL('./', window.location.href).href
         },
         cache: { cacheLocation: 'sessionStorage' }
       })
@@ -239,6 +240,7 @@ function App() {
   useEffect(() => { save(S + '-goals', goals); }, [goals]);
   useEffect(() => {
     let active = true;
+    sessionStorage.removeItem(SYNC_MODAL_REDIRECT_KEY);
     const initializeMicrosoftAuth = async () => {
       if (!msalClient) {
         setSyncStatus(MICROSOFT_CLIENT_ID
@@ -517,16 +519,14 @@ function App() {
       return;
     }
     setSyncing(true);
-    setSyncStatus('Opening Microsoft sign-in...');
+    setSyncStatus('Redirecting to Microsoft sign-in...');
     try {
       const prompt = msalClient.getAllAccounts().length > 1 ? 'select_account' : undefined;
-      const result = await msalClient.loginPopup({ scopes: MSAL_SCOPES, prompt });
-      msalClient.setActiveAccount(result.account);
-      setAccount(result.account);
-      setSyncStatus(`Connected as ${result.account.username}`);
+      sessionStorage.setItem(SYNC_MODAL_REDIRECT_KEY, '1');
+      await msalClient.loginRedirect({ scopes: MSAL_SCOPES, prompt });
     } catch (error) {
+      sessionStorage.removeItem(SYNC_MODAL_REDIRECT_KEY);
       setSyncStatus(`Microsoft sign-in failed: ${error.message}`);
-    } finally {
       setSyncing(false);
     }
   };
@@ -1140,7 +1140,7 @@ function SyncModal({ account, configured, authLoading, dirty, syncing, onClose, 
         {!account ? (
           <>
             <p className="sync-description">Sign in with your personal Microsoft account. Your encrypted budget is stored in your OneDrive app folder.</p>
-            {!configured && <div className="import-error">OneDrive is not configured yet. Set the Microsoft Entra client ID in <code>site/config.js</code> and register this app URL and its <code>auth-callback.html</code> URL as single-page application redirect URIs.</div>}
+            {!configured && <div className="import-error">OneDrive is not configured yet. Set the Microsoft Entra client ID in <code>site/config.js</code> and register this app URL as a single-page application redirect URI.</div>}
             <div className="sync-note">Status: {status}</div>
             <div className="sync-actions">
               <button className="btn btn-g" onClick={onClose}>Close</button>
