@@ -13,7 +13,6 @@ const load = (key, fallback) => {
 const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
 const uid = () => Math.random().toString(36).slice(2, 11) + Date.now().toString(36);
 const GRAPH_FILE_PATH = '/me/drive/special/approot:/PlanSurfBudget.enc.json:/content';
-const LEGACY_API_BASE_URL = 'https://plansurf-service.onrender.com';
 const MICROSOFT_CLIENT_ID = window.PLAN_SURF_CONFIG?.microsoftClientId?.trim() || '';
 const MSAL_SCOPES = ['Files.ReadWrite.AppFolder'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -619,69 +618,39 @@ function App() {
     }
   };
 
-  const legacyRequest = async (path, options = {}, token) => {
-    const response = await fetch(`${LEGACY_API_BASE_URL}${path}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options.headers || {})
-      },
-      cache: 'no-store'
-    });
-    const payload = await response.json().catch(() => ({ error: 'The legacy service returned an invalid response.' }));
-    if (!response.ok) throw new Error(payload.error || `Legacy service request failed (${response.status}).`);
-    return payload;
-  };
-
-  const migrateLegacyBudget = async (legacyPassword, passphrase) => {
-    if (!legacyPassword.trim()) {
-      setSyncStatus('Enter the current plansurf-service password to migrate your budget');
-      return false;
-    }
+  const importBudgetFile = async (file, passphrase) => {
     if (!passphrase) {
-      setSyncStatus('Enter a OneDrive encryption passphrase before migrating');
+      setSyncStatus('Enter a OneDrive encryption passphrase before importing');
       return false;
     }
-    if ((dirty || hasLocalBudget) && !window.confirm('Migration will replace the current local budget with the legacy budget after saving it to OneDrive. Continue?')) return false;
+    if ((dirty || hasLocalBudget) && !window.confirm('Importing this file will replace the current local budget. Continue?')) return false;
 
     setSyncing(true);
-    setSyncStatus('Reading your existing budget from plansurf-service...');
-    let legacyToken = '';
-    let logoutWarning = '';
+    setSyncStatus('Reading your local budget file...');
     try {
-      const login = await legacyRequest('/api/budget/login', {
-        method: 'POST',
-        body: JSON.stringify({ password: legacyPassword })
-      });
-      if (typeof login.token !== 'string' || !login.token) throw new Error('The legacy service did not return a valid session.');
-      legacyToken = login.token;
-      const data = validateSyncData(await legacyRequest('/api/budget/data', {}, legacyToken));
-
+      let data;
       try {
-        await legacyRequest('/api/budget/logout', { method: 'POST' }, legacyToken);
+        data = validateSyncData(JSON.parse(await file.text()));
       } catch (error) {
-        logoutWarning = ` Legacy sign-out failed: ${error.message}`;
+        if (error instanceof SyntaxError) throw new Error('The selected file is not valid JSON.');
+        throw error;
       }
-      legacyToken = '';
 
-      const serialized = await encryptBudget(data, passphrase);
-      await graphFileRequest('PUT', serialized);
+      const existingFile = await graphFileRequest('GET');
+      if (existingFile !== null && !window.confirm('A PlanSurf budget already exists in this OneDrive. Replace it with the selected file?')) {
+        setSyncStatus('Import cancelled; the OneDrive budget was not changed');
+        return false;
+      }
+
+      await graphFileRequest('PUT', await encryptBudget(data, passphrase));
       applySyncData(data);
       setDirty(false);
-      setSyncStatus(`Legacy budget migrated to encrypted OneDrive storage.${logoutWarning} The old GitHub copy was not deleted.`);
+      setSyncStatus('Budget imported, encrypted, and saved to OneDrive');
       return true;
     } catch (error) {
-      setSyncStatus(`Migration failed: ${error.message}`);
+      setSyncStatus(`Budget import failed: ${error.message}`);
       return false;
     } finally {
-      if (legacyToken) {
-        try {
-          await legacyRequest('/api/budget/logout', { method: 'POST' }, legacyToken);
-        } catch (error) {
-          setSyncStatus((current) => `${current} Legacy sign-out failed: ${error.message}`);
-        }
-      }
       setSyncing(false);
     }
   };
@@ -861,7 +830,7 @@ function App() {
           onSignOut={signOutMicrosoft}
           onPull={pullOneDrive}
           onPush={pushOneDrive}
-          onMigrate={migrateLegacyBudget}
+          onImportFile={importBudgetFile}
           status={syncStatus}
         />
       )}
@@ -1121,16 +1090,15 @@ function TransactionEditRow({ draft, setDraft, onSave, onCancel }) {
   );
 }
 
-function SyncModal({ account, configured, authLoading, dirty, syncing, onClose, onSignIn, onSignOut, onPull, onPush, onMigrate, status }) {
+function SyncModal({ account, configured, authLoading, dirty, syncing, onClose, onSignIn, onSignOut, onPull, onPush, onImportFile, status }) {
   const [passphrase, setPassphrase] = useState('');
-  const [legacyPassword, setLegacyPassword] = useState('');
+  const importFileInput = useRef(null);
 
-  const migrate = async () => {
-    const migrated = await onMigrate(legacyPassword, passphrase);
-    if (migrated) {
-      setLegacyPassword('');
-      setPassphrase('');
-    }
+  const importFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (await onImportFile(file, passphrase)) setPassphrase('');
   };
 
   return (
@@ -1171,21 +1139,17 @@ function SyncModal({ account, configured, authLoading, dirty, syncing, onClose, 
             </div>
 
             <div className="migration-panel">
-              <h4>Move your existing budget</h4>
-              <p>Import the current budget from plansurf-service, encrypt it, and save it to this OneDrive. This does not delete the old GitHub copy.</p>
-              <div className="fg">
-                <label htmlFor="legacy-password">Current plansurf-service password</label>
-                <input
-                  id="legacy-password"
-                  type="password"
-                  value={legacyPassword}
-                  onChange={(event) => setLegacyPassword(event.target.value)}
-                  autoComplete="current-password"
-                  placeholder="Legacy sync password"
-                />
-              </div>
-              <button className="btn btn-g" disabled={syncing || !passphrase || !legacyPassword.trim()} onClick={migrate}>
-                {syncing ? 'Migrating...' : 'Import and encrypt existing budget'}
+              <h4>Import an existing budget file</h4>
+              <p>Select a PlanSurf JSON backup containing <code>transactions</code> and <code>goals</code>. It is encrypted in this browser and saved to your OneDrive; it is not sent to the old service.</p>
+              <input
+                ref={importFileInput}
+                type="file"
+                accept=".json,application/json"
+                onChange={importFile}
+                hidden
+              />
+              <button className="btn btn-g" disabled={syncing || !passphrase} onClick={() => importFileInput.current?.click()}>
+                {syncing ? 'Importing...' : 'Choose JSON file and import'}
               </button>
             </div>
 

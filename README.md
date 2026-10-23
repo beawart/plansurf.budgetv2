@@ -15,7 +15,7 @@ User's OneDrive
   - remains under the user's Microsoft account and can be deleted there
 ```
 
-The optional migration action reads the existing plaintext budget from `plansurf-service`, encrypts it in the browser, and saves it to OneDrive. It does not delete the old copy in the private GitHub repository; retention and deletion there must be handled separately.
+An existing JSON backup can be imported locally once. The browser validates and encrypts it before saving to OneDrive; no budget data is sent through `plansurf-service`.
 
 ## Run the static container
 
@@ -43,7 +43,7 @@ The app uses the `consumers` authority and saves `PlanSurfBudget.enc.json` under
 
 The file uses AES-256-GCM with a key derived in the browser from the user's passphrase using PBKDF2-SHA-256. The passphrase is not stored or sent to Microsoft; the same passphrase is needed on every device. There is no passphrase recovery. Losing it makes the encrypted OneDrive file unreadable. The app currently also keeps a plaintext working copy in that browser's local storage.
 
-To move the existing budget, open Budget Sync, sign in to Microsoft, enter a new encryption passphrase and the current `plansurf-service` password, then choose **Import and encrypt existing budget**. Verify the OneDrive copy before separately arranging deletion/retention of the old GitHub-backed copy. Normal Load/Save actions only read/write the OneDrive file.
+To import an existing PlanSurf JSON backup, open Budget Sync, sign in to Microsoft, enter a new encryption passphrase, and choose **Import an existing budget file**. The file must contain a `transactions` object and a `goals` array (an optional `app` field must be `plansurf-budget`). The app reads it locally, validates it, encrypts it in the browser, and saves it to OneDrive. It does not send the file to `plansurf-service`. The import warns before replacing an existing OneDrive budget or non-empty local budget. This is optional; new users can start fresh and use normal Load/Save actions.
 
 The page still uses browser-loaded React/Babel/PapaParse and MSAL assets. The per-response CSP nonce permits Babel's transformed app code without enabling inline scripts or `unsafe-eval`; `unsafe-inline` is allowed for styles because the existing React UI uses dynamic style attributes. A hosted client can be changed to capture data before encryption; bundle and pin dependencies, move JSX transformation to build time, review the release pipeline, and address local-storage protection before treating this as production-ready for financial data.
 
@@ -56,7 +56,7 @@ This repository keeps the app in `site/`, which is not an available folder in th
 3. Add the `MICROSOFT_CLIENT_ID` Actions repository variable as described above.
 4. Wait for the **Deploy GitHub Pages** workflow to finish. GitHub will show the site URL under **Settings → Pages** and in the workflow deployment.
 
-The project URL is `https://beawart.github.io/plansurf.budgetv2/`. Sign-in uses a full-page redirect rather than a popup, so the app URL must be registered as an Entra SPA redirect URI. Without the client ID and redirect registration, the page can load, but OneDrive sign-in and saving are not enabled. The one-time legacy migration also depends on the existing service allowing browser requests from the Pages origin (CORS).
+The project URL is `https://beawart.github.io/plansurf.budgetv2/`. Sign-in uses a full-page redirect rather than a popup, so the app URL must be registered as an Entra SPA redirect URI. Without the client ID and redirect registration, the page can load, but OneDrive sign-in and saving are not enabled.
 
 ## Before production release
 
